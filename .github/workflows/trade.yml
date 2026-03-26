@@ -20,7 +20,7 @@ jobs:
           cache: 'pip'
 
       - name: Install dependencies
-        run: pip install ccxt pandas pandas_ta ta pyyaml python-dotenv requests
+        run: pip install ccxt pandas ta pyyaml python-dotenv requests
 
       - name: Download database
         env:
