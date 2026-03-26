@@ -1,0 +1,55 @@
+# ===== Trading Strategy Configuration =====
+
+# Target trading pair (DOGE/JPY - currently held asset)
+symbol: DOGE/JPY
+
+# Timeframes for multi-timeframe analysis
+timeframes:
+  entry: 1h      # Entry signal timeframe
+  trend: 4h      # Trend filter timeframe
+
+# --- EMA (Exponential Moving Average) ---
+# Optimized: EMA10 catches trends faster than EMA20
+ema_fast_period: 10
+ema_slow_period: 50
+
+# --- ADX (Average Directional Index) ---
+adx_period: 14
+adx_threshold: 25    # DOGE optimized: 25 filters noise better
+
+# --- ATR (Average True Range) ---
+atr_period: 14
+
+# --- Chandelier Exit (Trailing Stop) ---
+# Optimized: 2.0 tighter than 2.8 = earlier exits, lower drawdown (-0.99%)
+chandelier_multiplier: 2.0
+
+# --- Scaling Out (Partial Take Profit) ---
+scaling_rr_target: 2.5       # DOGE optimized: wider target for better PF
+scaling_close_ratio: 0.5     # Close this fraction of position at target
+
+# --- Overbought Detection ---
+disparity_ema_period: 20
+disparity_threshold: 3.5     # Disparity Index threshold (%)
+rsi_period: 14
+rsi_overbought_entry: 75     # RSI level considered overbought
+rsi_overbought_exit: 70      # RSI drop below this triggers exit
+
+# --- Position Sizing ---
+risk_per_trade_pct: 1.0      # Risk per trade as % of total equity
+max_position_pct: 10.0       # Max single position as % of equity
+
+# --- Circuit Breaker (Safety Limits) ---
+max_concurrent_positions: 3
+max_daily_trades: 10
+max_daily_loss_pct: 3.0      # Halt trading if daily loss exceeds this %
+max_consecutive_losses: 5    # Halt after N consecutive losses
+
+# --- Order Execution ---
+maker_timeout_seconds: 180   # Cancel unfilled limit order after this
+order_poll_interval: 5       # Check order fill status every N seconds
+emergency_stop_slippage: 0.5 # Max slippage % for emergency market orders
+
+# --- Trading Fees (Bitbank) ---
+maker_fee: -0.0002           # -0.02% rebate
+taker_fee: 0.0012            # 0.12%

@@ -1,0 +1,10 @@
+.env
+data/candles.db
+data/logs/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.venv/

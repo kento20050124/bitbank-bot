@@ -1,0 +1,62 @@
+name: Bitbank Trading Bot
+
+on:
+  schedule:
+    # Every 30 minutes, 24/7
+    - cron: '0,30 * * * *'
+  workflow_dispatch:  # Manual trigger from GitHub UI
+
+jobs:
+  trade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install ccxt pandas pandas_ta ta pyyaml python-dotenv requests
+
+      - name: Download database
+        env:
+          DB_B64: ${{ secrets.DB_B64 }}
+        run: |
+          if [ -n "$DB_B64" ]; then
+            echo "$DB_B64" | base64 -d > data/candles.db
+            echo "Database restored from secret"
+          else
+            mkdir -p data
+            echo "No database found, will collect fresh data"
+          fi
+
+      - name: Run trading tick
+        env:
+          BITBANK_API_KEY: ${{ secrets.BITBANK_API_KEY }}
+          BITBANK_API_SECRET: ${{ secrets.BITBANK_API_SECRET }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          REPORT_EMAIL: ${{ secrets.REPORT_EMAIL }}
+        run: |
+          cd $GITHUB_WORKSPACE
+          python scripts/tick_ci.py
+
+      - name: Upload database artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: candles-db
+          path: data/candles.db
+          retention-days: 3
+          overwrite: true
+
+      - name: Save database to cache
+        if: always()
+        run: |
+          if [ -f data/candles.db ]; then
+            DB_SIZE=$(wc -c < data/candles.db)
+            echo "Database size: $DB_SIZE bytes"
+          fi
