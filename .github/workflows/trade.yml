@@ -2,8 +2,8 @@ name: Bitbank Trading Bot
 
 on:
   schedule:
-    # Every 30 minutes, 24/7
-    - cron: '0,30 * * * *'
+    # Every 15 minutes, 24/7
+    - cron: '*/15 * * * *'
   workflow_dispatch:  # Manual trigger from GitHub UI
 
 jobs:
