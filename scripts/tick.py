@@ -89,40 +89,6 @@ def _notify_trade(action, symbol, side, amount, price, reason, pnl=None, equity=
     _send_email(f"[BOT] {action} {symbol} {side.upper()}", body)
 
 
-def _send_tick_summary(mode, equity, jpy_free, holdings, open_positions, actions, signals_found):
-    """Send a summary email after every tick execution."""
-    now = datetime.now().strftime("%Y/%m/%d %H:%M")
-    lines = [f"[Bitbank BOT] Tick完了 ({mode.upper()})", f"時刻: {now}", ""]
-    lines.append(f"■ 総資産: {equity:,.0f}円 (JPY={jpy_free:,.0f})")
-    for sym, h in holdings.items():
-        if h["value_jpy"] > 100:
-            lines.append(f"  {sym}: {h['amount']:.4f} ({h['value_jpy']:,.0f}円)")
-    lines.append("")
-    if open_positions:
-        lines.append(f"■ ポジション ({len(open_positions)}件):")
-        for pos in open_positions:
-            lines.append(f"  {pos.symbol} {pos.side.value.upper()} "
-                         f"数量={pos.current_amount:.4f} 取得={pos.entry_price:.4f}")
-    else:
-        lines.append("■ ポジション: なし")
-    lines.append("")
-    if actions:
-        lines.append("■ 今回のアクション:")
-        for a in actions:
-            lines.append(f"  {a}")
-    else:
-        lines.append("■ アクション: なし")
-    lines.append("")
-    if signals_found:
-        lines.append("■ シグナル検出:")
-        for s in signals_found:
-            lines.append(f"  {s}")
-    else:
-        lines.append("■ シグナル: なし")
-    body = "\n".join(lines)
-    _send_email(f"[BOT] Tick {now} | {equity:,.0f}円", body)
-
-
 # ── Order helpers ───────────────────────────────────────────────────
 
 def _place_limit_order(client, symbol, side, amount, price, logger):
@@ -402,10 +368,6 @@ def run_tick(mode="live"):
                 logger.info("Max positions reached (%d).", max_pos)
                 tick_actions.append(f"Max positions ({max_pos})")
 
-        # Send tick summary email
-        final_positions = store.get_open_positions()
-        _send_tick_summary(mode, total_equity, jpy_free, holdings,
-                           final_positions, tick_actions, tick_signals)
     except Exception as e:
         logger.error("Tick error: %s", e, exc_info=True)
         notifier.send_error(f"Tick error: {e}")
