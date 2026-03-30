@@ -89,6 +89,40 @@ def _notify_trade(action, symbol, side, amount, price, reason, pnl=None, equity=
     _send_email(f"[BOT] {action} {symbol} {side.upper()}", body)
 
 
+def _send_tick_summary(mode, equity, jpy_free, holdings, open_positions, actions, signals_found):
+    """Send a summary email after every tick execution."""
+    now = datetime.now().strftime("%Y/%m/%d %H:%M")
+    lines = [f"[Bitbank BOT] Tick完了 ({mode.upper()})", f"時刻: {now}", ""]
+    lines.append(f"■ 総資産: {equity:,.0f}円 (JPY={jpy_free:,.0f})")
+    for sym, h in holdings.items():
+        if h["value_jpy"] > 100:
+            lines.append(f"  {sym}: {h['amount']:.4f} ({h['value_jpy']:,.0f}円)")
+    lines.append("")
+    if open_positions:
+        lines.append(f"■ ポジション ({len(open_positions)}件):")
+        for pos in open_positions:
+            lines.append(f"  {pos.symbol} {pos.side.value.upper()} "
+                         f"数量={pos.current_amount:.4f} 取得={pos.entry_price:.4f}")
+    else:
+        lines.append("■ ポジション: なし")
+    lines.append("")
+    if actions:
+        lines.append("■ 今回のアクション:")
+        for a in actions:
+            lines.append(f"  {a}")
+    else:
+        lines.append("■ アクション: なし")
+    lines.append("")
+    if signals_found:
+        lines.append("■ シグナル検出:")
+        for s in signals_found:
+            lines.append(f"  {s}")
+    else:
+        lines.append("■ シグナル: なし")
+    body = "\n".join(lines)
+    _send_email(f"[BOT] Tick {now} | {equity:,.0f}円", body)
+
+
 # ── Order helpers ───────────────────────────────────────────────────
 
 def _place_limit_order(client, symbol, side, amount, price, logger):
@@ -201,6 +235,9 @@ def run_tick(mode="live"):
     cb = CircuitBreaker(store, cfg)
     notifier = DiscordNotifier(config.notification)
 
+    tick_actions = []
+    tick_signals = []
+
     try:
         balance = client.fetch_balance()
         jpy_free = float(balance.get("JPY", {}).get("free", 0) or 0)
@@ -242,18 +279,86 @@ def run_tick(mode="live"):
                     bf = float(balance.get(base, {}).get("free", 0) or 0)
                     _execute_exit(pos, es, client, store, cb, notifier, cfg, mode,
                                   jpy_free=jpy_free, base_free=bf, equity=total_equity)
+                    tick_actions.append(f"EXIT {pos.symbol}: {es.exit_type}")
                 else:
                     store.save_position(pos)
             except Exception as e:
                 logger.error("Exit check %s: %s", pos.symbol, e)
 
+        # Liquidate untracked holdings in bearish market
+        all_open = store.get_open_positions()
+        pos_syms = {p.symbol for p in all_open}
+        pos_amounts = {}
+        for p in all_open:
+            base = p.symbol.split("/")[0]
+            pos_amounts[base] = pos_amounts.get(base, 0) + p.current_amount
+        for sym, h in list(holdings.items()):
+            if h["value_jpy"] < MIN_TRADE_VALUE_JPY:
+                continue
+            base = sym.split("/")[0]
+            # Amount not covered by open positions
+            untracked = h["amount"] - pos_amounts.get(base, 0)
+            if untracked * h["price"] < MIN_TRADE_VALUE_JPY:
+                continue
+            # Check if this symbol has a SHORT trend (bearish)
+            try:
+                fetch_latest_candles(client, store, sym, "1h", limit=10)
+                time.sleep(0.3)
+                df_check = store.get_candles_df(sym, "1h", limit=200)
+                if len(df_check) < 60:
+                    continue
+                df_check = compute_all_indicators(df_check,
+                    ema_fast=cfg.ema_fast_period, ema_slow=cfg.ema_slow_period,
+                    adx_period=cfg.adx_period, atr_period=cfg.atr_period,
+                    rsi_period=cfg.rsi_period, disparity_ema_period=cfg.disparity_ema_period)
+                last = df_check.iloc[-1]
+                ema_f = last.get(f"ema_{cfg.ema_fast_period}")
+                ema_s = last.get(f"ema_{cfg.ema_slow_period}")
+                adx = last.get(f"adx_{cfg.adx_period}")
+                price_now = last["close"]
+                if pd.isna(ema_f) or pd.isna(ema_s) or pd.isna(adx):
+                    continue
+                # Bearish: price < EMA fast < EMA slow AND ADX shows trend strength
+                if price_now < ema_f < ema_s and adx >= cfg.adx_threshold:
+                    market = client.get_market_info(sym)
+                    prec = market.get("precision", {}).get("amount", 0.0001)
+                    dec = max(0, -int(math.floor(math.log10(prec)))) if prec > 0 else 4
+                    sell_amount = round(untracked * 0.95, dec)
+                    mn = market.get("limits", {}).get("amount", {}).get("min", 0.0001)
+                    if sell_amount < mn:
+                        continue
+                    reason = f"BEARISH_LIQUIDATE: {sym} EMA{cfg.ema_fast_period}<EMA{cfg.ema_slow_period}, ADX={adx:.1f}"
+                    logger.info(reason)
+                    if mode == "dry-run":
+                        logger.info("DRY-RUN LIQUIDATE: sell %.4f %s", sell_amount, sym)
+                        tick_actions.append(f"DRY-RUN LIQUIDATE {sym}: {sell_amount:.4f}")
+                    elif mode == "paper":
+                        logger.info("PAPER LIQUIDATE: sell %.4f %s", sell_amount, sym)
+                        tick_actions.append(f"PAPER LIQUIDATE {sym}: {sell_amount:.4f}")
+                    else:
+                        op = _get_price(client, sym, "sell")
+                        result = _place_limit_order(client, sym, "sell", sell_amount, op, logger)
+                        if result:
+                            jpy_free += result["filled"] * result["price"]
+                            tick_actions.append(f"LIQUIDATE {sym}: sold {result['filled']:.4f} @ {result['price']:.4f}")
+                            _notify_trade("LIQUIDATE", sym, "sell", result["filled"],
+                                          result["price"], reason, equity=total_equity)
+                            notifier.send_trade(action="LIQUIDATE", symbol=sym, side="sell",
+                                                amount=result["filled"], price=result["price"],
+                                                reason=reason)
+                        else:
+                            tick_actions.append(f"LIQUIDATE {sym}: order failed")
+            except Exception as e:
+                logger.debug("Liquidation check %s failed: %s", sym, e)
+
         # Scan for entries
         if cb.is_halted:
             logger.warning("Circuit breaker: %s", cb.halt_reason)
+            tick_actions.append(f"Circuit breaker: {cb.halt_reason}")
         else:
             all_open = store.get_open_positions()
             open_syms = {p.symbol for p in all_open}
-            max_pos = 1 if total_equity < 100_000 else cfg.max_concurrent_positions
+            max_pos = cfg.max_concurrent_positions
             if len(all_open) < max_pos:
                 cands = []
                 for sym in SCAN_SYMBOLS:
@@ -263,27 +368,44 @@ def run_tick(mode="live"):
                     if r:
                         sig, sc, _, pr, adx, rsi = r
                         cands.append((sym, sig, sc, pr, adx, rsi))
+                        tick_signals.append(f"{sym} {sig.direction.value.upper()} ADX={adx:.1f} RSI={rsi:.1f} score={sc:.1f}")
                         logger.info("  %s: %s ADX=%.1f RSI=%.1f score=%.1f",
                                     sym, sig.direction.value.upper(), adx, rsi, sc)
                 if cands:
                     cands.sort(key=lambda x: -x[2])
-                    bsym, bsig, bsc, bpr, badx, _ = cands[0]
-                    logger.info("BEST: %s %s (score=%.1f)", bsym,
-                                bsig.direction.value.upper(), bsc)
-                    base = bsym.split("/")[0]
-                    bf = float(balance.get(base, {}).get("free", 0) or 0)
-                    if bsig.direction.value == "long" and jpy_free < MIN_TRADE_VALUE_JPY:
-                        logger.info("LONG but JPY=%.0f < %d. Skip.", jpy_free, MIN_TRADE_VALUE_JPY)
-                    elif bsig.direction.value == "short" and bf * bpr < MIN_TRADE_VALUE_JPY:
-                        logger.info("SHORT but %s too small. Skip.", base)
-                    elif cb.check_can_trade(bsym, total_equity):
-                        _execute_entry(bsig, bsym, total_equity, client, store,
-                                       notifier, cfg, mode, jpy_free=jpy_free,
-                                       base_free=bf, price=bpr)
+                    entered = False
+                    for bsym, bsig, bsc, bpr, badx, _ in cands:
+                        logger.info("TRY: %s %s (score=%.1f)", bsym,
+                                    bsig.direction.value.upper(), bsc)
+                        base = bsym.split("/")[0]
+                        bf = float(balance.get(base, {}).get("free", 0) or 0)
+                        if bsig.direction.value == "long" and jpy_free < MIN_TRADE_VALUE_JPY:
+                            logger.info("LONG but JPY=%.0f < %d. Skip.", jpy_free, MIN_TRADE_VALUE_JPY)
+                            tick_actions.append(f"SKIP {bsym} LONG: JPY不足")
+                            continue
+                        if bsig.direction.value == "short" and bf * bpr < MIN_TRADE_VALUE_JPY:
+                            logger.info("SHORT but %s too small. Next.", base)
+                            tick_actions.append(f"SKIP {bsym} SHORT: 残高不足")
+                            continue
+                        if cb.check_can_trade(bsym, total_equity):
+                            _execute_entry(bsig, bsym, total_equity, client, store,
+                                           notifier, cfg, mode, jpy_free=jpy_free,
+                                           base_free=bf, price=bpr)
+                            tick_actions.append(f"ENTRY {bsym} {bsig.direction.value.upper()} @ {bpr:.4f}")
+                            entered = True
+                            break
+                    if not entered:
+                        logger.info("All %d signals skipped (insufficient balance).", len(cands))
                 else:
                     logger.info("No signals across %d symbols.", len(SCAN_SYMBOLS))
             else:
                 logger.info("Max positions reached (%d).", max_pos)
+                tick_actions.append(f"Max positions ({max_pos})")
+
+        # Send tick summary email
+        final_positions = store.get_open_positions()
+        _send_tick_summary(mode, total_equity, jpy_free, holdings,
+                           final_positions, tick_actions, tick_signals)
     except Exception as e:
         logger.error("Tick error: %s", e, exc_info=True)
         notifier.send_error(f"Tick error: {e}")
