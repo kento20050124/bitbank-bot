@@ -2,8 +2,11 @@ name: Bitbank Trading Bot
 
 on:
   schedule:
-    # Every 15 minutes, 24/7
-    - cron: '*/15 * * * *'
+    # Every 5 minutes, 24/7
+    # GitHub Actions のスケジューラは負荷時に run を skip するため、
+    # 設定上 5分間隔にしておくと実効的に 10-15分間隔程度に落ち着く。
+    # public リポジトリのため Actions の実行時間は無制限・無料。
+    - cron: '*/5 * * * *'
   workflow_dispatch:  # Manual trigger from GitHub UI
 
 # 同一runを並行起動させない（DB競合防止）
