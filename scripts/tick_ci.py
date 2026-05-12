@@ -158,7 +158,25 @@ def _scan(client, store, symbol, cfg, equity, min_lot=0.0001):
         chop_bonus = 0.0
         if not pd.isna(chop):
             chop_bonus = max(0.0, min(10.0, (cfg.chop_max_threshold - float(chop)) / 2.36))
-        score = adx_s + rsi_s + vol_s + aff_s + chop_bonus
+
+        # Supertrend / Donchian の方向一致ボーナス (各最大5pt)
+        st_bonus = 0.0
+        dc_bonus = 0.0
+        st_dir = last.get("supertrend_dir")
+        dc_upper = last.get("donchian_upper")
+        dc_lower = last.get("donchian_lower")
+        is_long = sig.direction.value == "long"
+        if not pd.isna(st_dir):
+            if (is_long and st_dir > 0) or (not is_long and st_dir < 0):
+                st_bonus = 5.0
+        if not pd.isna(dc_upper) and not pd.isna(dc_lower):
+            # ブレイクアウト方向との一致確認 (Donchian上限/下限の近傍にいるか)
+            if is_long and price >= float(dc_upper) * 0.998:
+                dc_bonus = 5.0
+            elif not is_long and price <= float(dc_lower) * 1.002:
+                dc_bonus = 5.0
+
+        score = adx_s + rsi_s + vol_s + aff_s + chop_bonus + st_bonus + dc_bonus
 
         # [C] 高価格銘柄(min_lot×price >= 5000円)は閾値超のみ採用
         min_notional = min_lot * price

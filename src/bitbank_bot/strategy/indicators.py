@@ -56,6 +56,70 @@ def compute_disparity(close: pd.Series, ema_period: int = 20) -> pd.Series:
     return ((close - ema) / ema) * 100
 
 
+def compute_supertrend(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    period: int = 10,
+    multiplier: float = 3.0,
+) -> pd.DataFrame:
+    """Supertrend インジケータ。
+
+    返り値の DataFrame に `supertrend` (ライン値) と `supertrend_dir`
+    (+1=上昇トレンド, -1=下降トレンド) を持たせる。
+    """
+    atr = compute_atr(high, low, close, period)
+    hl2 = (high + low) / 2.0
+    upper_band = hl2 + multiplier * atr
+    lower_band = hl2 - multiplier * atr
+
+    # Cumulative band logic
+    final_upper = upper_band.copy()
+    final_lower = lower_band.copy()
+    direction = pd.Series(index=close.index, dtype="float64")
+    supertrend = pd.Series(index=close.index, dtype="float64")
+
+    for i in range(len(close)):
+        if i == 0:
+            direction.iloc[i] = 1
+            supertrend.iloc[i] = final_lower.iloc[i]
+            continue
+        prev_st = supertrend.iloc[i - 1]
+        if close.iloc[i] > prev_st:
+            direction.iloc[i] = 1
+        elif close.iloc[i] < prev_st:
+            direction.iloc[i] = -1
+        else:
+            direction.iloc[i] = direction.iloc[i - 1]
+
+        if direction.iloc[i] == 1:
+            # 上昇トレンド: lower band を引き上げて持続
+            final_lower.iloc[i] = max(final_lower.iloc[i], prev_st) \
+                if direction.iloc[i - 1] == 1 else final_lower.iloc[i]
+            supertrend.iloc[i] = final_lower.iloc[i]
+        else:
+            final_upper.iloc[i] = min(final_upper.iloc[i], prev_st) \
+                if direction.iloc[i - 1] == -1 else final_upper.iloc[i]
+            supertrend.iloc[i] = final_upper.iloc[i]
+
+    return pd.DataFrame({"supertrend": supertrend, "supertrend_dir": direction})
+
+
+def compute_donchian(
+    high: pd.Series, low: pd.Series, period: int = 20
+) -> pd.DataFrame:
+    """Donchian Channel.
+
+    返り値: `donchian_upper`, `donchian_lower`, `donchian_mid`
+    """
+    upper = high.rolling(period).max()
+    lower = low.rolling(period).min()
+    mid = (upper + lower) / 2.0
+    return pd.DataFrame(
+        {"donchian_upper": upper, "donchian_lower": lower, "donchian_mid": mid}
+    )
+
+
 def compute_choppiness(
     high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14
 ) -> pd.Series:
@@ -94,6 +158,9 @@ def compute_all_indicators(
     rsi_period: int = 14,
     disparity_ema_period: int = 20,
     chop_period: int = 14,
+    supertrend_period: int = 10,
+    supertrend_multiplier: float = 3.0,
+    donchian_period: int = 20,
 ) -> pd.DataFrame:
     """Compute all indicators and add them as columns to the DataFrame.
 
@@ -130,5 +197,19 @@ def compute_all_indicators(
     result[f"chop_{chop_period}"] = compute_choppiness(
         result["high"], result["low"], result["close"], chop_period
     )
+
+    # Supertrend (確信度スコアの追加要素)
+    st_df = compute_supertrend(
+        result["high"], result["low"], result["close"],
+        supertrend_period, supertrend_multiplier,
+    )
+    result["supertrend"] = st_df["supertrend"]
+    result["supertrend_dir"] = st_df["supertrend_dir"]
+
+    # Donchian Channel (ブレイクアウト判定)
+    dc = compute_donchian(result["high"], result["low"], donchian_period)
+    result["donchian_upper"] = dc["donchian_upper"]
+    result["donchian_lower"] = dc["donchian_lower"]
+    result["donchian_mid"] = dc["donchian_mid"]
 
     return result

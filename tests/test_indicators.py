@@ -9,8 +9,10 @@ from bitbank_bot.strategy.indicators import (
     compute_atr,
     compute_choppiness,
     compute_disparity,
+    compute_donchian,
     compute_ema,
     compute_rsi,
+    compute_supertrend,
 )
 
 
@@ -80,6 +82,29 @@ def test_compute_choppiness_flat_range_is_high():
     assert tail.mean() > 50, f"Flat range CI should be high, got {tail.mean():.1f}"
 
 
+def test_compute_supertrend(sample_ohlcv_df):
+    st = compute_supertrend(
+        sample_ohlcv_df["high"],
+        sample_ohlcv_df["low"],
+        sample_ohlcv_df["close"],
+        period=10, multiplier=3.0,
+    )
+    assert "supertrend" in st.columns
+    assert "supertrend_dir" in st.columns
+    # supertrend_dir は ±1
+    valid_dir = st["supertrend_dir"].dropna()
+    assert valid_dir.isin([1.0, -1.0]).all()
+
+
+def test_compute_donchian(sample_ohlcv_df):
+    dc = compute_donchian(sample_ohlcv_df["high"], sample_ohlcv_df["low"], period=20)
+    # upper >= mid >= lower (warmup後)
+    tail = dc.dropna().tail(10)
+    assert len(tail) > 0
+    assert (tail["donchian_upper"] >= tail["donchian_mid"]).all()
+    assert (tail["donchian_mid"] >= tail["donchian_lower"]).all()
+
+
 def test_compute_all_indicators(sample_ohlcv_df):
     result = compute_all_indicators(sample_ohlcv_df)
     # Check all expected columns exist
@@ -90,4 +115,7 @@ def test_compute_all_indicators(sample_ohlcv_df):
     assert "rsi_14" in result.columns
     assert "disparity_20" in result.columns
     assert "chop_14" in result.columns
+    assert "supertrend" in result.columns
+    assert "supertrend_dir" in result.columns
+    assert "donchian_upper" in result.columns
     assert len(result) == len(sample_ohlcv_df)
