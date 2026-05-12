@@ -60,6 +60,11 @@ def collect_historical_candles(
     since_ms = int(since_dt.timestamp() * 1000)
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     total_saved = 0
+    # bitbankは日付別エンドポイント（/candlestick/{tf}/{YYYYMMDD}）で、
+    # 当該日にデータが無い・未公開だと空配列を返す。連続X日空でも諦めず1日ずつ進める。
+    consecutive_empty_days = 0
+    max_empty_days = 7
+    one_day_ms = 86_400_000
 
     while since_ms < now_ms:
         try:
@@ -71,8 +76,20 @@ def collect_historical_candles(
             break
 
         if not ohlcv:
-            logger.info("No more candle data available.")
-            break
+            # 空でも次の日にskipして続行（bitbankの日別エンドポイント特性に対応）
+            consecutive_empty_days += 1
+            since_ms += one_day_ms
+            if consecutive_empty_days >= max_empty_days:
+                logger.info(
+                    "%d consecutive empty days, stopping collection for %s.",
+                    max_empty_days,
+                    symbol,
+                )
+                break
+            time.sleep(0.2)
+            continue
+
+        consecutive_empty_days = 0
 
         candles = [
             Candle(
@@ -91,9 +108,12 @@ def collect_historical_candles(
         store.save_candles(candles)
         total_saved += len(candles)
 
-        # Move to next batch
+        # 次のバッチ。返却が1件しか無い場合に無限ループを避けるため最低1tf進める。
         last_ts = ohlcv[-1][0]
-        since_ms = last_ts + tf_ms
+        next_since = last_ts + tf_ms
+        if next_since <= since_ms:
+            next_since = since_ms + tf_ms
+        since_ms = next_since
 
         logger.info(
             "Saved %d candles (total: %d), latest: %s",
@@ -117,33 +137,63 @@ def fetch_latest_candles(
     symbol: str,
     timeframe: str,
     limit: int = 10,
+    lookback_days: int = 2,
 ):
     """Fetch the most recent candles and update the store.
 
-    Used during live trading to keep the database up to date.
+    bitbankは日別エンドポイントのため、`since=None`では当日分のみ返ることが多い。
+    日跨ぎでの取りこぼしを避けるため、直近 `lookback_days` 日分を `since` 指定で取得する。
+    保存時は PRIMARY KEY (symbol, timeframe, timestamp) で重複は OR REPLACE される。
     """
-    try:
-        ohlcv = client.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-    except Exception as e:
-        logger.error("Failed to fetch latest candles: %s", e)
-        return 0
+    tf_ms = TIMEFRAME_MS.get(timeframe, 3_600_000)
+    one_day_ms = 86_400_000
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    since_ms = now_ms - (lookback_days * one_day_ms)
+    total_saved = 0
 
-    if not ohlcv:
-        return 0
+    cursor = since_ms
+    consecutive_empty = 0
+    # 日跨ぎ対応: 最大 lookback_days+1 回ループ（1日1コール想定）
+    max_loops = lookback_days + 2
+    for _ in range(max_loops):
+        if cursor >= now_ms:
+            break
+        try:
+            ohlcv = client.fetch_ohlcv(
+                symbol, timeframe=timeframe, since=cursor, limit=limit
+            )
+        except Exception as e:
+            logger.error("Failed to fetch latest candles for %s: %s", symbol, e)
+            return total_saved
 
-    candles = [
-        Candle(
-            timestamp=datetime.fromtimestamp(row[0] / 1000, tz=timezone.utc),
-            symbol=symbol,
-            timeframe=timeframe,
-            open=float(row[1]),
-            high=float(row[2]),
-            low=float(row[3]),
-            close=float(row[4]),
-            volume=float(row[5]),
-        )
-        for row in ohlcv
-    ]
+        if not ohlcv:
+            consecutive_empty += 1
+            cursor += one_day_ms
+            if consecutive_empty >= 2:
+                break
+            continue
 
-    store.save_candles(candles)
-    return len(candles)
+        consecutive_empty = 0
+        candles = [
+            Candle(
+                timestamp=datetime.fromtimestamp(row[0] / 1000, tz=timezone.utc),
+                symbol=symbol,
+                timeframe=timeframe,
+                open=float(row[1]),
+                high=float(row[2]),
+                low=float(row[3]),
+                close=float(row[4]),
+                volume=float(row[5]),
+            )
+            for row in ohlcv
+        ]
+        store.save_candles(candles)
+        total_saved += len(candles)
+
+        last_ts = ohlcv[-1][0]
+        next_cursor = last_ts + tf_ms
+        if next_cursor <= cursor:
+            next_cursor = cursor + one_day_ms
+        cursor = next_cursor
+
+    return total_saved

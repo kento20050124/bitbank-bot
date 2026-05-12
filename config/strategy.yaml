@@ -53,3 +53,22 @@ emergency_stop_slippage: 0.5 # Max slippage % for emergency market orders
 # --- Trading Fees (Bitbank) ---
 maker_fee: -0.0002           # -0.02% rebate
 taker_fee: 0.0012            # 0.12%
+
+# --- Slippage / Cost Model ---
+# best±0.2% で指値 → 即時不約定時のリスクを織り込む
+expected_slippage_pct: 0.002
+
+# --- Regime Filter (Choppiness Index) ---
+# CI(14) > 61.8 = レンジ相場、トレンドフォロー戦略では新規エントリーを抑制
+chop_period: 14
+chop_max_threshold: 61.8
+
+# --- Small-Capital Symbol Selection ---
+# min_lot * 現値 が高い銘柄(BTC/ETH等)は確信度の高いシグナルのみ採用する
+expensive_min_notional_jpy: 5000.0
+expensive_symbol_min_score: 60.0
+
+# --- Expected Value Gate ---
+# 期待利益 = score-based × ATR - (2×taker_fee_equiv + slippage)
+# このR(stop_distance単位)が下限超のシグナルのみエントリー
+expected_value_min_r: 0.0

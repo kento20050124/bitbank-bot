@@ -6,6 +6,7 @@ Shared between live trading and backtesting for consistency.
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 from ta.momentum import RSIIndicator
 from ta.trend import ADXIndicator, EMAIndicator
@@ -55,6 +56,35 @@ def compute_disparity(close: pd.Series, ema_period: int = 20) -> pd.Series:
     return ((close - ema) / ema) * 100
 
 
+def compute_choppiness(
+    high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14
+) -> pd.Series:
+    """Choppiness Index (E. W. Dreiss).
+
+    100 * log10( sum(ATR_1, period) / (max(high, period) - min(low, period)) ) / log10(period)
+
+    高い値 (>= 61.8) はレンジ/横ばい、低い値 (<= 38.2) は強いトレンドを示す。
+    トレンドフォロー戦略では高CI時のエントリーを抑制することで whipsaw を減らせる。
+    """
+    # True Range（1期間ATR相当）
+    prev_close = close.shift(1)
+    tr = pd.concat(
+        [
+            high - low,
+            (high - prev_close).abs(),
+            (low - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+
+    sum_tr = tr.rolling(period).sum()
+    highest = high.rolling(period).max()
+    lowest = low.rolling(period).min()
+    range_ = (highest - lowest).replace(0, np.nan)
+    ci = 100 * np.log10(sum_tr / range_) / np.log10(period)
+    return ci
+
+
 def compute_all_indicators(
     df: pd.DataFrame,
     ema_fast: int = 20,
@@ -63,6 +93,7 @@ def compute_all_indicators(
     atr_period: int = 14,
     rsi_period: int = 14,
     disparity_ema_period: int = 20,
+    chop_period: int = 14,
 ) -> pd.DataFrame:
     """Compute all indicators and add them as columns to the DataFrame.
 
@@ -93,6 +124,11 @@ def compute_all_indicators(
     # Disparity
     result[f"disparity_{disparity_ema_period}"] = compute_disparity(
         result["close"], disparity_ema_period
+    )
+
+    # Choppiness Index (レジーム判定用)
+    result[f"chop_{chop_period}"] = compute_choppiness(
+        result["high"], result["low"], result["close"], chop_period
     )
 
     return result
