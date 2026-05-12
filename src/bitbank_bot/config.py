@@ -54,6 +54,17 @@ class StrategyConfig:
     risk_per_trade_pct: float = 1.0
     max_position_pct: float = 10.0
 
+    # 確信度ベースの動的サイジング: score を 0-100 で受け取り、
+    # risk% を [confidence_min_risk_pct, confidence_max_risk_pct] の範囲で線形補間。
+    # confidence_score_min 未満のシグナルでも risk_per_trade_pct=base にフォールバック。
+    confidence_min_risk_pct: float = 0.5
+    confidence_max_risk_pct: float = 1.5
+    confidence_score_min: float = 50.0
+    confidence_score_max: float = 90.0
+
+    # Breakeven Stop Move: 含み益が breakeven_trigger_r × ATR に達したら SL を建値に移動
+    breakeven_trigger_r: float = 1.0
+
     # Circuit Breaker
     max_concurrent_positions: int = 3
     max_daily_trades: int = 10
@@ -153,6 +164,11 @@ def load_config(env_path: str | None = None, strategy_path: str | None = None) -
         expensive_min_notional_jpy=strategy_data.get("expensive_min_notional_jpy", 5000.0),
         expensive_symbol_min_score=strategy_data.get("expensive_symbol_min_score", 60.0),
         expected_value_min_r=strategy_data.get("expected_value_min_r", 0.0),
+        confidence_min_risk_pct=strategy_data.get("confidence_min_risk_pct", 0.5),
+        confidence_max_risk_pct=strategy_data.get("confidence_max_risk_pct", 1.5),
+        confidence_score_min=strategy_data.get("confidence_score_min", 50.0),
+        confidence_score_max=strategy_data.get("confidence_score_max", 90.0),
+        breakeven_trigger_r=strategy_data.get("breakeven_trigger_r", 1.0),
     )
 
     # Build NotificationConfig

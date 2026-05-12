@@ -330,7 +330,8 @@ def main():
                     elif bsig.direction.value == "short" and bf * bpr < MIN_TRADE_VALUE_JPY:
                         logger.info("SHORT but %s too small. Skip.", base)
                     elif cb.check_can_trade(bsym, total):
-                        _do_entry(bsig, bsym, total, client, store, cfg, jpy, bf, bpr)
+                        _do_entry(bsig, bsym, total, client, store, cfg, jpy, bf, bpr,
+                                  confidence_score=bsc)
                 else:
                     logger.info("No signals across %d symbols.", len(SCAN_SYMBOLS))
         else:
@@ -344,11 +345,12 @@ def main():
         logger.info("TICK_CI END")
 
 
-def _do_entry(sig, sym, equity, client, store, cfg, jpy, bf, price):
+def _do_entry(sig, sym, equity, client, store, cfg, jpy, bf, price, confidence_score=None):
     market = client.get_market_info(sym)
     mn = market.get("limits", {}).get("amount", {}).get("min", 0.0001)
     ps = calculate_position_size(equity=equity, entry_price=sig.entry_price,
-                                  stop_distance=sig.stop_distance, cfg=cfg, min_order_size=mn)
+                                  stop_distance=sig.stop_distance, cfg=cfg,
+                                  min_order_size=mn, confidence_score=confidence_score)
     if ps <= 0:
         return
     side = "buy" if sig.direction.value == "long" else "sell"
