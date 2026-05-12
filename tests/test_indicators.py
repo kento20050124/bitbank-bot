@@ -7,9 +7,12 @@ import pytest
 from bitbank_bot.strategy.indicators import (
     compute_all_indicators,
     compute_atr,
+    compute_choppiness,
     compute_disparity,
+    compute_donchian,
     compute_ema,
     compute_rsi,
+    compute_supertrend,
 )
 
 
@@ -52,6 +55,56 @@ def test_compute_disparity(sample_ohlcv_df):
     assert len(valid) > 0
 
 
+def test_compute_choppiness(sample_ohlcv_df):
+    chop = compute_choppiness(
+        sample_ohlcv_df["high"],
+        sample_ohlcv_df["low"],
+        sample_ohlcv_df["close"],
+        14,
+    )
+    valid = chop.dropna()
+    assert len(valid) > 0
+    # Choppinessは理論上 0..100 だが実装上 100 をやや超えることもあるので余裕を持たせる
+    assert (valid >= 0).all()
+    assert (valid <= 110).all()
+
+
+def test_compute_choppiness_flat_range_is_high():
+    """フラットなレンジ → Choppiness は高い値（>50）になる。"""
+    n = 60
+    flat = pd.Series([100.0 + np.sin(i / 3.0) * 0.5 for i in range(n)])
+    high = flat + 0.5
+    low = flat - 0.5
+    chop = compute_choppiness(high, low, flat, 14)
+    # 後半（warmup後）の平均値を見る
+    tail = chop.dropna().tail(20)
+    assert len(tail) > 0
+    assert tail.mean() > 50, f"Flat range CI should be high, got {tail.mean():.1f}"
+
+
+def test_compute_supertrend(sample_ohlcv_df):
+    st = compute_supertrend(
+        sample_ohlcv_df["high"],
+        sample_ohlcv_df["low"],
+        sample_ohlcv_df["close"],
+        period=10, multiplier=3.0,
+    )
+    assert "supertrend" in st.columns
+    assert "supertrend_dir" in st.columns
+    # supertrend_dir は ±1
+    valid_dir = st["supertrend_dir"].dropna()
+    assert valid_dir.isin([1.0, -1.0]).all()
+
+
+def test_compute_donchian(sample_ohlcv_df):
+    dc = compute_donchian(sample_ohlcv_df["high"], sample_ohlcv_df["low"], period=20)
+    # upper >= mid >= lower (warmup後)
+    tail = dc.dropna().tail(10)
+    assert len(tail) > 0
+    assert (tail["donchian_upper"] >= tail["donchian_mid"]).all()
+    assert (tail["donchian_mid"] >= tail["donchian_lower"]).all()
+
+
 def test_compute_all_indicators(sample_ohlcv_df):
     result = compute_all_indicators(sample_ohlcv_df)
     # Check all expected columns exist
@@ -61,4 +114,8 @@ def test_compute_all_indicators(sample_ohlcv_df):
     assert "atr_14" in result.columns
     assert "rsi_14" in result.columns
     assert "disparity_20" in result.columns
+    assert "chop_14" in result.columns
+    assert "supertrend" in result.columns
+    assert "supertrend_dir" in result.columns
+    assert "donchian_upper" in result.columns
     assert len(result) == len(sample_ohlcv_df)

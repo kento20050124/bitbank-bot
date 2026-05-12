@@ -54,6 +54,17 @@ class StrategyConfig:
     risk_per_trade_pct: float = 1.0
     max_position_pct: float = 10.0
 
+    # 確信度ベースの動的サイジング: score を 0-100 で受け取り、
+    # risk% を [confidence_min_risk_pct, confidence_max_risk_pct] の範囲で線形補間。
+    # confidence_score_min 未満のシグナルでも risk_per_trade_pct=base にフォールバック。
+    confidence_min_risk_pct: float = 0.5
+    confidence_max_risk_pct: float = 1.5
+    confidence_score_min: float = 50.0
+    confidence_score_max: float = 90.0
+
+    # Breakeven Stop Move: 含み益が breakeven_trigger_r × ATR に達したら SL を建値に移動
+    breakeven_trigger_r: float = 1.0
+
     # Circuit Breaker
     max_concurrent_positions: int = 3
     max_daily_trades: int = 10
@@ -68,6 +79,20 @@ class StrategyConfig:
     # Fees
     maker_fee: float = -0.0002
     taker_fee: float = 0.0012
+
+    # 想定スリッページ（指値がbest±0.2%で置かれ、即時約定しない場合の予備マージン）
+    expected_slippage_pct: float = 0.002
+
+    # Choppiness Indexによるレジームフィルタ
+    chop_period: int = 14
+    chop_max_threshold: float = 61.8  # これ超ならレンジ判定でエントリースキップ
+
+    # 銘柄プライオリティ: 高価格(min_lot×price)が大きい銘柄は確信度ハードルを上げる
+    expensive_min_notional_jpy: float = 5000.0  # min_lot * price がこれ以上なら "高価格" 扱い
+    expensive_symbol_min_score: float = 60.0    # 高価格銘柄の最低スコア閾値
+
+    # 期待値ゲート: 想定R(=stop_distance単位)あたり何JPY期待できるかが正でなければスキップ
+    expected_value_min_r: float = 0.0  # 0=コスト相殺以上、ポジティブで上乗せ要求
 
 
 @dataclass(frozen=True)
@@ -133,6 +158,17 @@ def load_config(env_path: str | None = None, strategy_path: str | None = None) -
         emergency_stop_slippage=strategy_data.get("emergency_stop_slippage", 0.5),
         maker_fee=strategy_data.get("maker_fee", -0.0002),
         taker_fee=strategy_data.get("taker_fee", 0.0012),
+        expected_slippage_pct=strategy_data.get("expected_slippage_pct", 0.002),
+        chop_period=strategy_data.get("chop_period", 14),
+        chop_max_threshold=strategy_data.get("chop_max_threshold", 61.8),
+        expensive_min_notional_jpy=strategy_data.get("expensive_min_notional_jpy", 5000.0),
+        expensive_symbol_min_score=strategy_data.get("expensive_symbol_min_score", 60.0),
+        expected_value_min_r=strategy_data.get("expected_value_min_r", 0.0),
+        confidence_min_risk_pct=strategy_data.get("confidence_min_risk_pct", 0.5),
+        confidence_max_risk_pct=strategy_data.get("confidence_max_risk_pct", 1.5),
+        confidence_score_min=strategy_data.get("confidence_score_min", 50.0),
+        confidence_score_max=strategy_data.get("confidence_score_max", 90.0),
+        breakeven_trigger_r=strategy_data.get("breakeven_trigger_r", 1.0),
     )
 
     # Build NotificationConfig

@@ -44,6 +44,9 @@ SCAN_SYMBOLS = [
     "SOL/JPY", "LTC/JPY", "ETH/JPY", "BTC/JPY",
 ]
 MIN_TRADE_VALUE_JPY = 500
+# 30日相関 > しきい値 のペアは片方のみエントリー（小資金時の重複リスク回避）
+CORRELATION_THRESHOLD = 0.85
+CORRELATION_LOOKBACK = 24 * 30  # H1 × 30日
 WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 REPORT_EMAIL = os.getenv("REPORT_EMAIL", "suzukikento@datarein-inc.com")
 
@@ -96,7 +99,14 @@ def _get_price(client, symbol, side):
     return float(t["ask"]) * 1.002 if side == "buy" else float(t["bid"]) * 0.998
 
 
-def _scan(client, store, symbol, cfg, equity):
+def _scan(client, store, symbol, cfg, equity, min_lot=0.0001):
+    """銘柄シグナルをスキャンして (sig, score, price, adx, rsi, ev_r) を返す。
+
+    新規追加フィルタ:
+    - Choppiness Index > chop_max_threshold (レンジ判定) ならスキップ
+    - 高価格銘柄(min_lot * price >= expensive_min_notional_jpy) は確信度ハードル↑
+    - 期待値ゲート: score-based × ATR の見込み利益 - コスト < 0 ならスキップ
+    """
     try:
         fetch_latest_candles(client, store, symbol, "1h", limit=10)
         time.sleep(0.3)
@@ -111,15 +121,25 @@ def _scan(client, store, symbol, cfg, equity):
             return None
         kw = dict(ema_fast=cfg.ema_fast_period, ema_slow=cfg.ema_slow_period,
                   adx_period=cfg.adx_period, atr_period=cfg.atr_period,
-                  rsi_period=cfg.rsi_period, disparity_ema_period=cfg.disparity_ema_period)
+                  rsi_period=cfg.rsi_period, disparity_ema_period=cfg.disparity_ema_period,
+                  chop_period=cfg.chop_period)
         df = compute_all_indicators(df, **kw)
         df4 = compute_all_indicators(df4, **kw)
         last = df.iloc[-1]
-        price, adx, rsi, atr = (last["close"], last.get(f"adx_{cfg.adx_period}", 0),
-                                 last.get(f"rsi_{cfg.rsi_period}", 50),
-                                 last.get(f"atr_{cfg.atr_period}", 0))
+        price = last["close"]
+        adx = last.get(f"adx_{cfg.adx_period}", 0)
+        rsi = last.get(f"rsi_{cfg.rsi_period}", 50)
+        atr = last.get(f"atr_{cfg.atr_period}", 0)
+        chop = last.get(f"chop_{cfg.chop_period}", 50.0)
         if any(pd.isna(v) for v in [adx, rsi, atr]) or atr <= 0 or rsi < 10 or rsi > 90:
             return None
+
+        # [D] レジームフィルタ: Choppinessが高い=レンジ → トレンドフォローはスキップ
+        if not pd.isna(chop) and float(chop) > cfg.chop_max_threshold:
+            logger.debug("%s: skip chop=%.1f > %.1f (range regime)",
+                         symbol, chop, cfg.chop_max_threshold)
+            return None
+
         sig = generate_entry_signal(df, df4, cfg)
         if not sig:
             return None
@@ -127,15 +147,104 @@ def _scan(client, store, symbol, cfg, equity):
             return None
         if sig.direction.value == "short" and rsi < 30:
             return None
-        # Score
+
+        # スコア（既存ロジック）
         adx_s = min(float(adx), 60) / 60 * 40
         rsi_s = max(0, 20 - abs(rsi - (55 if sig.direction.value == "long" else 45)) * 0.5)
         atr_pct = (atr / price) * 100
         vol_s = 20 if 1 <= atr_pct <= 5 else (atr_pct * 20 if atr_pct < 1 else max(0, 20 - (atr_pct - 5) * 4))
         aff_s = min(20, (equity * 0.1 / price) * 2)
-        return (sig, adx_s + rsi_s + vol_s + aff_s, price, adx, rsi)
-    except Exception:
+        # Choppinessが低い(=強トレンド)ほどボーナス: 38.2以下で最大、61.8で0
+        chop_bonus = 0.0
+        if not pd.isna(chop):
+            chop_bonus = max(0.0, min(10.0, (cfg.chop_max_threshold - float(chop)) / 2.36))
+
+        # Supertrend / Donchian の方向一致ボーナス (各最大5pt)
+        st_bonus = 0.0
+        dc_bonus = 0.0
+        st_dir = last.get("supertrend_dir")
+        dc_upper = last.get("donchian_upper")
+        dc_lower = last.get("donchian_lower")
+        is_long = sig.direction.value == "long"
+        if not pd.isna(st_dir):
+            if (is_long and st_dir > 0) or (not is_long and st_dir < 0):
+                st_bonus = 5.0
+        if not pd.isna(dc_upper) and not pd.isna(dc_lower):
+            # ブレイクアウト方向との一致確認 (Donchian上限/下限の近傍にいるか)
+            if is_long and price >= float(dc_upper) * 0.998:
+                dc_bonus = 5.0
+            elif not is_long and price <= float(dc_lower) * 1.002:
+                dc_bonus = 5.0
+
+        score = adx_s + rsi_s + vol_s + aff_s + chop_bonus + st_bonus + dc_bonus
+
+        # [C] 高価格銘柄(min_lot×price >= 5000円)は閾値超のみ採用
+        min_notional = min_lot * price
+        if min_notional >= cfg.expensive_min_notional_jpy and score < cfg.expensive_symbol_min_score:
+            logger.debug("%s: skip score=%.1f < %.1f (expensive: min_notional=%.0f)",
+                         symbol, score, cfg.expensive_symbol_min_score, min_notional)
+            return None
+
+        # [B] 手数料込み期待値ゲート
+        # 期待利益(R単位) = 期待payoff(scaling_rr_target に到達確率を score/100 で近似)
+        # - 2手数料相当 - スリッページ ≈ 全コストをR単位に換算
+        # コスト(JPY/単位) = 2×taker_fee×price + slippage_pct×price (Maker前提でもtaker_fee相当で保守的見積)
+        # コスト(R単位) = コスト / stop_distance
+        cost_jpy_per_unit = price * (2 * abs(cfg.taker_fee) + cfg.expected_slippage_pct)
+        cost_r = cost_jpy_per_unit / sig.stop_distance if sig.stop_distance > 0 else 999
+        # 期待payoff: scoreが100で scaling_rr_target、0なら0として線形補間
+        expected_payoff_r = (score / 100.0) * cfg.scaling_rr_target
+        ev_r = expected_payoff_r - cost_r
+        if ev_r < cfg.expected_value_min_r:
+            logger.debug("%s: skip EV=%.2fR < %.2fR (payoff=%.2f cost=%.2f)",
+                         symbol, ev_r, cfg.expected_value_min_r, expected_payoff_r, cost_r)
+            return None
+
+        return (sig, score, price, adx, rsi, ev_r)
+    except Exception as e:
+        logger.debug("Scan error %s: %s", symbol, e)
         return None
+
+
+def _filter_correlated(cands, store, threshold=CORRELATION_THRESHOLD):
+    """相関の高い銘柄ペアから低スコア側を除去（小資金時の分散効果保護）。
+
+    cands: list of (symbol, sig, score, price, adx, rsi, ev_r)
+    """
+    if len(cands) < 2:
+        return cands
+    # スコア降順で評価し、既選択銘柄との相関がしきい値超のものを落とす
+    sorted_c = sorted(cands, key=lambda x: -x[2])
+    selected = []
+    selected_returns = {}
+    for tup in sorted_c:
+        sym = tup[0]
+        df = store.get_candles_df(sym, "1h", limit=CORRELATION_LOOKBACK)
+        if len(df) < 50:
+            selected.append(tup)
+            continue
+        rets = df["close"].pct_change().dropna()
+        if rets.empty:
+            selected.append(tup)
+            continue
+        drop = False
+        for sel_sym, sel_rets in selected_returns.items():
+            # 共通長で相関を取る
+            common_len = min(len(rets), len(sel_rets))
+            if common_len < 50:
+                continue
+            r1 = rets.tail(common_len).reset_index(drop=True)
+            r2 = sel_rets.tail(common_len).reset_index(drop=True)
+            corr = r1.corr(r2)
+            if not pd.isna(corr) and abs(corr) > threshold:
+                logger.info("CORR_SKIP %s vs %s = %.2f (>%.2f), keep higher score",
+                            sym, sel_sym, corr, threshold)
+                drop = True
+                break
+        if not drop:
+            selected.append(tup)
+            selected_returns[sym] = rets
+    return selected
 
 
 def main():
@@ -216,16 +325,22 @@ def main():
                 for sym in SCAN_SYMBOLS:
                     if sym in open_syms:
                         continue
-                    r = _scan(client, store, sym, cfg, total)
+                    market = client.exchange.markets.get(sym, {})
+                    min_lot = market.get("limits", {}).get("amount", {}).get("min", 0.0001) or 0.0001
+                    r = _scan(client, store, sym, cfg, total, min_lot=min_lot)
                     if r:
-                        sig, sc, pr, adx, rsi = r
-                        cands.append((sym, sig, sc, pr, adx, rsi))
-                        logger.info("  %s: %s ADX=%.1f RSI=%.1f score=%.1f",
-                                    sym, sig.direction.value.upper(), adx, rsi, sc)
+                        sig, sc, pr, adx, rsi, ev_r = r
+                        cands.append((sym, sig, sc, pr, adx, rsi, ev_r))
+                        logger.info("  %s: %s ADX=%.1f RSI=%.1f score=%.1f EV=%.2fR",
+                                    sym, sig.direction.value.upper(), adx, rsi, sc, ev_r)
+                if cands:
+                    # [C] 相関フィルタ: 高相関ペアからは低スコア側を落とす
+                    cands = _filter_correlated(cands, store)
                 if cands:
                     cands.sort(key=lambda x: -x[2])
-                    bsym, bsig, bsc, bpr, _, _ = cands[0]
-                    logger.info("BEST: %s %s (score=%.1f)", bsym, bsig.direction.value.upper(), bsc)
+                    bsym, bsig, bsc, bpr, _, _, bev = cands[0]
+                    logger.info("BEST: %s %s (score=%.1f EV=%.2fR)",
+                                bsym, bsig.direction.value.upper(), bsc, bev)
                     base = bsym.split("/")[0]
                     bf = float(balance.get(base, {}).get("free", 0) or 0)
                     if bsig.direction.value == "long" and jpy < MIN_TRADE_VALUE_JPY:
@@ -233,7 +348,8 @@ def main():
                     elif bsig.direction.value == "short" and bf * bpr < MIN_TRADE_VALUE_JPY:
                         logger.info("SHORT but %s too small. Skip.", base)
                     elif cb.check_can_trade(bsym, total):
-                        _do_entry(bsig, bsym, total, client, store, cfg, jpy, bf, bpr)
+                        _do_entry(bsig, bsym, total, client, store, cfg, jpy, bf, bpr,
+                                  confidence_score=bsc)
                 else:
                     logger.info("No signals across %d symbols.", len(SCAN_SYMBOLS))
         else:
@@ -247,11 +363,12 @@ def main():
         logger.info("TICK_CI END")
 
 
-def _do_entry(sig, sym, equity, client, store, cfg, jpy, bf, price):
+def _do_entry(sig, sym, equity, client, store, cfg, jpy, bf, price, confidence_score=None):
     market = client.get_market_info(sym)
     mn = market.get("limits", {}).get("amount", {}).get("min", 0.0001)
     ps = calculate_position_size(equity=equity, entry_price=sig.entry_price,
-                                  stop_distance=sig.stop_distance, cfg=cfg, min_order_size=mn)
+                                  stop_distance=sig.stop_distance, cfg=cfg,
+                                  min_order_size=mn, confidence_score=confidence_score)
     if ps <= 0:
         return
     side = "buy" if sig.direction.value == "long" else "sell"

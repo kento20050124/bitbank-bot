@@ -7,6 +7,7 @@ import pytest
 from bitbank_bot.config import StrategyConfig
 from bitbank_bot.data.models import Position, PositionState, Side
 from bitbank_bot.strategy.exit import (
+    BreakevenStopMove,
     ChandelierExit,
     OverboughtExit,
     ScalingOut,
@@ -166,3 +167,57 @@ def test_overbought_exit_rsi_drop():
     signal = rule.check(position, df, cfg)
     assert signal is not None
     assert signal.exit_type == "overbought"
+
+
+def test_breakeven_move_long_triggers_at_1r():
+    """LONGポジで含み益が1R(=ATR×breakeven_trigger_r)に達するとSLが建値に移動。"""
+    cfg = StrategyConfig(atr_period=14, breakeven_trigger_r=1.0)
+    pos = Position(
+        side=Side.BUY,
+        entry_price=100.0,
+        amount=1.0,
+        current_amount=1.0,
+        state=PositionState.OPEN,
+        stop_price=96.0,
+        highest_price=100.0,
+    )
+    n = 20
+    prices = [100.0] * (n - 1) + [102.0]
+    df = pd.DataFrame({
+        "open": prices,
+        "high": [p + 0.5 for p in prices],
+        "low": [p - 0.5 for p in prices],
+        "close": prices,
+        "volume": [1000] * n,
+        "atr_14": [2.0] * n,
+    })
+    rule = BreakevenStopMove()
+    sig = rule.check(pos, df, cfg)
+    assert sig is None
+    assert pos.stop_price == 100.0
+
+
+def test_breakeven_move_does_not_retrigger_above_entry():
+    cfg = StrategyConfig(atr_period=14, breakeven_trigger_r=1.0)
+    pos = Position(
+        side=Side.BUY,
+        entry_price=100.0,
+        amount=1.0,
+        current_amount=1.0,
+        state=PositionState.OPEN,
+        stop_price=101.0,
+        highest_price=105.0,
+    )
+    n = 20
+    prices = [100.0] * (n - 1) + [110.0]
+    df = pd.DataFrame({
+        "open": prices,
+        "high": [p + 0.5 for p in prices],
+        "low": [p - 0.5 for p in prices],
+        "close": prices,
+        "volume": [1000] * n,
+        "atr_14": [2.0] * n,
+    })
+    rule = BreakevenStopMove()
+    rule.check(pos, df, cfg)
+    assert pos.stop_price == 101.0

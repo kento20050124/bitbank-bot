@@ -101,6 +101,62 @@ class ChandelierExit:
         return None
 
 
+class BreakevenStopMove:
+    """1R(=ATR×breakeven_trigger_r) 到達で SL を建値に移動するルール。
+
+    実取引はせず、Position.stop_price を建値に書き換える副作用のみ。
+    ChandelierExit は max(chandelier, stop_price) を採用するため、
+    一度建値に上がった SL は自然に保持される。
+    """
+
+    def check(
+        self, position: Position, df: pd.DataFrame, cfg: StrategyConfig
+    ) -> ExitSignal | None:
+        if position.state != PositionState.OPEN:
+            return None
+        if len(df) < cfg.atr_period + 1:
+            return None
+
+        last = df.iloc[-1]
+        atr_col = f"atr_{cfg.atr_period}"
+        atr = last.get(atr_col)
+        if pd.isna(atr) or atr <= 0:
+            return None
+
+        current_price = last["close"]
+        trigger_distance = atr * cfg.breakeven_trigger_r
+
+        if position.side == Side.BUY:
+            # 既に建値以上なら何もしない（重複SL移動を防止）
+            if position.stop_price >= position.entry_price:
+                return None
+            if current_price >= position.entry_price + trigger_distance:
+                logger.info(
+                    "BREAKEVEN_LONG: price=%.4f >= trigger=%.4f, "
+                    "SL %.4f -> %.4f (entry)",
+                    current_price,
+                    position.entry_price + trigger_distance,
+                    position.stop_price,
+                    position.entry_price,
+                )
+                position.stop_price = position.entry_price
+        elif position.side == Side.SELL:
+            if position.stop_price > 0 and position.stop_price <= position.entry_price:
+                return None
+            if current_price <= position.entry_price - trigger_distance:
+                logger.info(
+                    "BREAKEVEN_SHORT: price=%.4f <= trigger=%.4f, "
+                    "SL %.4f -> %.4f (entry)",
+                    current_price,
+                    position.entry_price - trigger_distance,
+                    position.stop_price,
+                    position.entry_price,
+                )
+                position.stop_price = position.entry_price
+
+        return None  # Exitはしない、副作用だけ
+
+
 class ScalingOut:
     """Partial take-profit when price reaches RR target.
 
@@ -242,7 +298,9 @@ class OverboughtExit:
 
 
 # Default exit rules in priority order
+# BreakevenStopMove は Exit を返さず副作用のみ。他ルールの実行を妨げないため先頭に置く。
 EXIT_RULES: list[ExitRule] = [
+    BreakevenStopMove(),
     ScalingOut(),
     OverboughtExit(),
     ChandelierExit(),

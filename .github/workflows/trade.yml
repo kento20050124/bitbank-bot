@@ -6,6 +6,11 @@ on:
     - cron: '*/15 * * * *'
   workflow_dispatch:  # Manual trigger from GitHub UI
 
+# 同一runを並行起動させない（DB競合防止）
+concurrency:
+  group: bitbank-trade
+  cancel-in-progress: false
+
 jobs:
   trade:
     runs-on: ubuntu-latest
@@ -22,16 +27,39 @@ jobs:
       - name: Install dependencies
         run: pip install ccxt pandas ta pyyaml python-dotenv requests
 
-      - name: Download database
+      - name: Prepare data directory
+        run: mkdir -p data data/logs
+
+      # GitHub Actions Cache でDBを run 間で永続化する。
+      # 保存キーは run ごとにユニーク（github.run_id）にして毎回書き込み、
+      # 復元は restore-keys プレフィックスで前回の最新を取得する。
+      - name: Restore DB cache
+        id: cache-db-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: data/candles.db
+          key: bitbank-candles-db-${{ github.run_id }}
+          restore-keys: |
+            bitbank-candles-db-
+
+      - name: Bootstrap DB from secret (fallback)
+        if: steps.cache-db-restore.outputs.cache-matched-key == ''
         env:
           DB_B64: ${{ secrets.DB_B64 }}
         run: |
-          if [ -n "$DB_B64" ]; then
+          if [ -n "$DB_B64" ] && [ ! -f data/candles.db ]; then
             echo "$DB_B64" | base64 -d > data/candles.db
-            echo "Database restored from secret"
+            echo "Database restored from secret (cache miss fallback)"
           else
-            mkdir -p data
-            echo "No database found, will collect fresh data"
+            echo "No cache and no secret bootstrap; will collect fresh data"
+          fi
+
+      - name: Show DB status (pre-tick)
+        run: |
+          if [ -f data/candles.db ]; then
+            echo "DB size: $(wc -c < data/candles.db) bytes"
+          else
+            echo "DB does not exist yet"
           fi
 
       - name: Run trading tick
@@ -44,6 +72,22 @@ jobs:
           cd $GITHUB_WORKSPACE
           python scripts/tick_ci.py
 
+      - name: Show DB status (post-tick)
+        if: always()
+        run: |
+          if [ -f data/candles.db ]; then
+            echo "DB size: $(wc -c < data/candles.db) bytes"
+          fi
+
+      # run間で永続化（毎回ユニークキーで保存）
+      - name: Save DB cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: data/candles.db
+          key: bitbank-candles-db-${{ github.run_id }}
+
+      # 監視用に直近のDBスナップショットをアーティファクトでも保管
       - name: Upload database artifact
         if: always()
         uses: actions/upload-artifact@v4
@@ -52,11 +96,3 @@ jobs:
           path: data/candles.db
           retention-days: 3
           overwrite: true
-
-      - name: Save database to cache
-        if: always()
-        run: |
-          if [ -f data/candles.db ]; then
-            DB_SIZE=$(wc -c < data/candles.db)
-            echo "Database size: $DB_SIZE bytes"
-          fi
